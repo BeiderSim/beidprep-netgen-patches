@@ -19,6 +19,7 @@ The patches apply to **Netgen v6.2.2608** — git tag `v6.2.2608`, commit
 | `patches/0004-keep-caller-meshed-faces.patch` | Faces that already hold surface elements when surface meshing starts are kept as they are and are not re-meshed or optimised. |
 | `patches/0005-per-face-time-limit.patch` | New meshing parameter `facetimeout` (seconds per face attempt): a face that exceeds it is given up cleanly (no half-meshed face) and the rest of the body is still meshed. |
 | `patches/0006-illegal-triangle-table-once.patch` | The table of illegal (duplicate) triangles read by the 2D optimisation is built once after all faces instead of after every face (the same table, so the same mesh; less time). |
+| `patches/0007-face-properties-on-first-use.patch` | A face's surface properties (area and centre of mass, `BRepGProp::SurfaceProperties`) are computed the first time they are asked for instead of whenever a face is created; surface meshing never reads them, so the mesh is the same in less time. |
 
 ## Licence
 

@@ -1,0 +1,44 @@
+diff --git a/libsrc/occ/occ_face.cpp b/libsrc/occ/occ_face.cpp
+index 74f5ac8..c215b15 100644
+--- a/libsrc/occ/occ_face.cpp
++++ b/libsrc/occ/occ_face.cpp
+@@ -18,8 +18,7 @@ namespace netgen
+     OCCFace::OCCFace(TopoDS_Shape dshape)
+         : face(TopoDS::Face(dshape))
+     {
+-        BRepGProp::SurfaceProperties (dshape, props);
+-        bbox = ::netgen::GetBoundingBox(face);
++        bbox = ::netgen::GetBoundingBox(face);          // patch 0007: props on first use
+ 
+         surface = BRep_Tool::Surface(face);
+         shape_analysis = new ShapeAnalysis_Surface( surface );
+@@ -33,6 +32,11 @@ namespace netgen
+ 
+     Point<3> OCCFace::GetCenter() const
+     {
++        if (!props_done)                                // patch 0007
++        {
++            BRepGProp::SurfaceProperties (face, props);
++            props_done = true;
++        }
+         return occ2ng( props.CentreOfMass() );
+     }
+ 
+diff --git a/libsrc/occ/occ_face.hpp b/libsrc/occ/occ_face.hpp
+index 71e583c..a105e5f 100644
+--- a/libsrc/occ/occ_face.hpp
++++ b/libsrc/occ/occ_face.hpp
+@@ -19,7 +19,12 @@ namespace netgen
+     class OCCFace : public GeometryFace 
+     {
+         TopoDS_Face face;
+-        GProp_GProps props;
++        // BeidPrep new-mesher patch 0007: the surface properties (exact area and centre,
++        // BRepGProp) are computed on first use (GetCenter, periodic identification) instead
++        // of for every face when the geometry is built: 2.1 s for the 164 faces of a
++        // stamped bracket, and meshing never reads them.
++        mutable GProp_GProps props;
++        mutable bool props_done = false;
+         Box<3> bbox;
+ 
+         Handle( Geom_Surface ) surface;

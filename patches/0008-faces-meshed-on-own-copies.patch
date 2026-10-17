@@ -1,0 +1,459 @@
+diff --git a/libsrc/meshing/basegeom.cpp b/libsrc/meshing/basegeom.cpp
+index c0e4862..1a353f7 100644
+--- a/libsrc/meshing/basegeom.cpp
++++ b/libsrc/meshing/basegeom.cpp
+@@ -1,4 +1,7 @@
+ #include <set>
++#include <atomic>      // patch 0008
++#include <exception>
++#include <thread>
+ 
+ #include <mystdlib.h>
+ #include "meshing.hpp"
+@@ -875,6 +878,20 @@ namespace netgen
+   void NetgenGeometry :: MeshSurface(Mesh& mesh,
+                                      const MeshingParameters& mparam) const
+   {
++    // patch 0008: faces meshed and optimised each on its own mesh copy (see
++    // MeshSurfaceFacewise), when no face is identified with another
++    if (mparam.facethreads > 0)
++      {
++        bool plain = true;
++        for (auto & f : faces)
++          if (f->primary != f.get() || f->IsConnectingCloseSurfaces() || f->identifications.Size())
++            plain = false;
++        if (plain)
++          {
++            MeshSurfaceFacewise(mesh, mparam);
++            return;
++          }
++      }
+     static Timer t1("Surface Meshing"); RegionTimer regt(t1);
+     const char* savetask = multithread.task;
+     multithread.task = "Mesh Surface";
+@@ -1341,6 +1358,230 @@ namespace netgen
+       }
+   }
+ 
++  // BeidPrep new-mesher patch 0008: every face meshed and optimised on its own copy.
++  //
++  // Each face that MeshSurface would mesh is meshed (MeshFace) and then optimised (the steps
++  // of OptimizeSurface, for this face only) on its OWN copy of the mesh as it stands when
++  // surface meshing starts: the same points, edge segments and descriptors, with the local
++  // size tree shared read-only (Meshing2 leaves it alone when mparam.facethreads > 0, which
++  // does not change any size it returns - see meshing2.cpp).  The copies are then merged
++  // into the mesh one face after the other, in face order.  No face sees another face's
++  // elements, so the mesh is the same whatever the order in which the faces were done and
++  // however many threads did them (mparam.facethreads).
++  static bool FacewiseFaceCopy (const Mesh & mesh, Mesh & fm, size_t nfaces_layers)
++  {
++    fm.SetGeometry (mesh.GetGeometry());
++    fm.SetDimension (mesh.GetDimension());
++    fm.SetGlobalH (mesh.GetGlobalH());
++    fm.SetMinimalH (mesh.GetMinimalH());
++    for (int layer = 1; layer <= int(nfaces_layers); layer++)
++      fm.SetLocalH (mesh.GetLocalH(layer), layer);
++    fm.Points() = mesh.Points();
++    fm.LineSegments() = mesh.LineSegments();
++    for (const auto & ed : mesh.EdgeDescriptors())
++      fm.AddEdgeDescriptor (ed);
++    for (const auto & fd : mesh.Regions<2>())
++      fm.AddFaceDescriptor (fd);
++    fm.ClearSurfaceElements();        // the copied descriptors must not point at mesh's elements
++    // every point of the mesh stays where it is in the copy (a Compress after a failed
++    // meshing attempt would otherwise renumber them); they are fixed edge and vertex points
++    // or points of other faces, so this changes nothing for the face meshed here
++    for (PointIndex pi : mesh.Points().Range())
++      fm.AddLockedPoint (pi);
++    return true;
++  }
++
++  void NetgenGeometry :: MeshSurfaceFacewise(Mesh& mesh, const MeshingParameters& mparam) const
++  {
++    static Timer t1("Surface Meshing (facewise)"); RegionTimer regt(t1);
++    const char* savetask = multithread.task;
++    multithread.task = "Mesh Surface";
++    mesh.ClearFaceDescriptors();
++
++    for(auto k : Range(faces))
++    {
++        auto & face = *faces[k];
++        FaceRegion fd(k+1, face.domin+1, face.domout+1, k+1);
++        if(face.properties.col)
++          fd.SetSurfColour(*face.properties.col);
++        mesh.AddFaceDescriptor(fd);
++        mesh.SetBCName(k, face.properties.GetName());
++    }
++
++    int max_index = mesh.GetNFD();
++    for(const auto & sel : mesh.SurfaceElements())
++        max_index = max2(max_index, sel.GetIndex().Nr1());
++    while(mesh.GetNFD() < max_index)
++    {
++        FaceRegion fd(mesh.GetNFD()+1, 0, 0, -1);
++        mesh.AddFaceDescriptor(fd);
++    }
++
++    prefilled_faces.assign(faces.Size(), false);        // patch 0004, as in MeshSurface
++    for(const auto & sel : mesh.SurfaceElements())
++      {
++        int k = sel.GetIndex().Nr1() - 1;
++        if(k >= 0 && k < (int)faces.Size() && !sel.IsDeleted())
++          prefilled_faces[k] = true;
++      }
++
++    Array<int> todo;
++    size_t nlayers = 1;
++    for(auto k : Range(faces))
++      {
++        nlayers = max2(nlayers, size_t(max2(1, faces[k]->properties.layer)));
++        if(!prefilled_faces[k])
++          todo.Append(k);
++      }
++
++    const int np0 = mesh.GetNP();
++    const bool optimize = mparam.perfstepsend >= MESHCONST_OPTSURFACE;
++
++    // what one face leaves behind: its new points (numbered after the mesh's np0 points)
++    // and its elements, which use mesh points and these new points
++    struct FaceResult
++    {
++      Array<MeshPoint> newpoints;
++      Array<Element2d> elements;
++      bool failed = false;
++      std::exception_ptr error;
++    };
++    std::vector<FaceResult> res(todo.Size());
++
++    auto run_parallel = [&] (auto && task)
++    {
++      int nthreads = max2(1, min2(mparam.facethreads, int(todo.Size())));
++      std::atomic<int> next(0);
++      auto worker = [&] ()
++      {
++        for (int i = next++; i < int(todo.Size()); i = next++)
++          {
++            try { task(i); }
++            catch (...) { res[i].error = std::current_exception(); }
++          }
++      };
++      if (nthreads == 1)
++        worker();
++      else
++        {
++          std::vector<std::thread> threads;
++          for (int t = 0; t < nthreads; t++)
++            threads.emplace_back(worker);
++          for (auto & th : threads)
++            th.join();
++        }
++      for (auto & r : res)                    // first error in face order, as a serial loop
++        if (r.error)
++          std::rethrow_exception(r.error);
++    };
++
++    auto take = [&] (Mesh & fm, FaceResult & r)
++    {
++      r.newpoints.SetSize(0);
++      for (int i = np0; i < fm.GetNP(); i++)
++        r.newpoints.Append(fm.Points()[PointIndex::FromNr0(i)]);
++      r.elements.SetSize(0);
++      for (SurfaceElementIndex sei : fm.SurfaceElements().Range())
++        if (!fm[sei].IsDeleted())
++          r.elements.Append(Element2d(fm[sei]));
++    };
++
++    // 1. mesh every face on its own copy
++    run_parallel ([&] (int i)
++    {
++      int k = todo[i];
++      Mesh fm;
++      FacewiseFaceCopy (mesh, fm, nlayers);
++      Array<int, PointIndex> glob2loc(fm.GetNP());
++      res[i].failed = MeshFace(fm, mparam, k, glob2loc);
++      take (fm, res[i]);
++    });
++
++    size_t n_failed_faces = 0;
++    for (auto & r : res)
++      if (r.failed)
++        n_failed_faces++;
++    if(n_failed_faces)
++    {
++        cout << "WARNING! NOT ALL FACES HAVE BEEN MESHED" << endl;
++        cout << "SURFACE MESHING ERROR OCCURRED IN " << n_failed_faces << " FACES:" << endl;
++    }
++    bool stop = n_failed_faces && mparam.facetimeout <= 0;    // as MeshSurface: no optimisation
++
++    // 2. optimise every face on its own copy (OptimizeSurface's steps, this face only)
++    if (optimize && !stop)
++      run_parallel ([&] (int i)
++      {
++        int k = todo[i];
++        auto & r = res[i];
++        if (!r.elements.Size())
++          return;
++        Mesh fm;
++        FacewiseFaceCopy (mesh, fm, nlayers);
++        for (auto & mp : r.newpoints)
++          fm.Points().Append(mp);
++        for (auto & el : r.elements)
++          fm.AddSurfaceElement(el);
++        fm.SetNextTimeStamp();
++        fm.FindIllegalTrigs();
++        fm.CalcSurfacesOfNode();
++        MeshOptimize2d meshopt(fm);
++        auto fi = FaceRegionIndex::FromNr0(k);
++        for(auto step : Range(mparam.optsteps2d))
++          {
++            (void)step;
++            meshopt.SetFaceIndex(fi);
++            meshopt.SetMetricWeight (mparam.elsizeweight);
++            for(auto optstep : mparam.optimize2d)
++              switch(optstep)
++                {
++                case 's': meshopt.EdgeSwapping(0); break;
++                case 'S': meshopt.EdgeSwapping(1); break;
++                case 'm': meshopt.ImproveMesh(mparam); break;
++                case 'c': meshopt.CombineImprove(); break;
++                }
++          }
++        take (fm, r);
++      });
++
++    // 3. merge in face order: each face's new points that its elements use, in their order
++    for (auto & r : res)
++      {
++        Array<bool> used(r.newpoints.Size());
++        used = false;
++        for (auto & el : r.elements)
++          for (auto pi : el.PNums())
++            if (pi.Nr0() >= np0)
++              used[pi.Nr0() - np0] = true;
++        Array<PointIndex> newnr(r.newpoints.Size());
++        for (auto j : Range(r.newpoints))
++          if (used[j])
++            {
++              mesh.Points().Append(r.newpoints[j]);
++              newnr[j] = PointIndex::FromNr0(mesh.GetNP() - 1);
++            }
++        for (auto & el : r.elements)
++          {
++            Element2d el2(el);
++            for (int j = 1; j <= el2.GetNP(); j++)
++              if (el2.PNum(j).Nr0() >= np0)
++                el2.PNum(j) = newnr[el2.PNum(j).Nr0() - np0];
++            mesh.AddSurfaceElement(el2);
++          }
++      }
++    mesh.SetNextTimeStamp();
++
++    if (stop)
++      return;
++    if (optimize)
++      {
++        mesh.CalcSurfacesOfNode();
++        mesh.Compress();
++      }
++    mesh.CalcSurfacesOfNode();
++    multithread.task = savetask;
++  }
++
+   void NetgenGeometry :: OptimizeSurface(Mesh& mesh, const MeshingParameters& mparam) const
+   {
+     const auto savetask = multithread.task;
+diff --git a/libsrc/meshing/basegeom.hpp b/libsrc/meshing/basegeom.hpp
+index 3fb9771..333d42b 100644
+--- a/libsrc/meshing/basegeom.hpp
++++ b/libsrc/meshing/basegeom.hpp
+@@ -260,6 +260,8 @@ namespace netgen
+                      int nr, FlatArray<int, PointIndex> glob2loc) const;
+     virtual void MapSurfaceMesh( Mesh & mesh, const GeometryFace & dst, std::map<tuple<PointIndex, int>, PointIndex> & mapto) const;
+     virtual void OptimizeSurface(Mesh& mesh, const MeshingParameters& mparam) const;
++    // patch 0008: every face meshed and optimised on its own mesh copy (mparam.facethreads)
++    void MeshSurfaceFacewise(Mesh& mesh, const MeshingParameters& mparam) const;
+ 
+     virtual void FinalizeMesh(Mesh& mesh) const;
+ 
+diff --git a/libsrc/meshing/global.cpp b/libsrc/meshing/global.cpp
+index 204596b..d3ffa68 100644
+--- a/libsrc/meshing/global.cpp
++++ b/libsrc/meshing/global.cpp
+@@ -96,7 +96,7 @@ namespace netgen
+   DebugParameters debugparam;
+   bool verbose = 0;
+ 
+-  size_t timestamp = 0;
++  std::atomic<size_t> timestamp{0};      // patch 0008: atomic
+   /*
+   int GetTimeStamp() 
+   { 
+diff --git a/libsrc/meshing/meshclass.hpp b/libsrc/meshing/meshclass.hpp
+index 4e00f5e..cdb3533 100644
+--- a/libsrc/meshing/meshclass.hpp
++++ b/libsrc/meshing/meshclass.hpp
+@@ -496,6 +496,9 @@ namespace netgen
+     DLL_HEADER void SetGlobalH (double h);
+     ///
+        DLL_HEADER void SetMinimalH (double h);
++    /// BeidPrep patch 0008: read back for the per-face mesh copies
++    double GetGlobalH () const { return hglob; }
++    double GetMinimalH () const { return hmin; }
+     ///
+         DLL_HEADER double MaxHDomain (int dom) const;
+     ///
+diff --git a/libsrc/meshing/meshing2.cpp b/libsrc/meshing/meshing2.cpp
+index a9fd488..efb4385 100644
+--- a/libsrc/meshing/meshing2.cpp
++++ b/libsrc/meshing/meshing2.cpp
+@@ -498,7 +498,11 @@ namespace netgen
+         double hshould = CalcLocalH (pmid, mesh.GetH (pmid, layer));
+         if (gh < hshould) hshould = gh;
+ 
+-        mesh.RestrictLocalH (pmid, hshould, layer);
++        // patch 0008: on a per-face mesh copy the size tree is shared read-only.  hshould is
++        // min(global h, tree h) here, so restricting the tree to it never lowers that minimum,
++        // which is all Mesh::GetH / GetMinH return: the sizes every face sees are unchanged
++        if (mp.facethreads <= 0)
++          mesh.RestrictLocalH (pmid, hshould, layer);
+ 
+         double h = hshould;
+ 
+@@ -992,7 +996,7 @@ namespace netgen
+                   found = 0;
+ 
+             //    cout << "violate = " << newedgemaxh / minh << endl;
+-            static double maxviolate = 0;
++            static thread_local double maxviolate = 0;     // patch 0008: per thread
+             if (newedgemaxh / minh > maxviolate)
+               {
+                 maxviolate = newedgemaxh / minh;
+@@ -1451,7 +1455,7 @@ namespace netgen
+                         (*testout) << "illegal point: " << gpi << endl;
+                       }
+ 
+-                    static int mtonnode = 0;
++                    static thread_local int mtonnode = 0;      // patch 0008: per thread
+                     if (trigsonnode[gpi] > mtonnode)
+                       mtonnode = trigsonnode[gpi];
+                   }
+diff --git a/libsrc/meshing/meshtype.hpp b/libsrc/meshing/meshtype.hpp
+index 2dc1470..0dc43c7 100644
+--- a/libsrc/meshing/meshtype.hpp
++++ b/libsrc/meshing/meshtype.hpp
+@@ -9,6 +9,7 @@
+ /**************************************************************************/
+ 
+ #include <variant>
++#include <atomic>
+ 
+ #include <mydefs.hpp>
+ #include <general/template.hpp>
+@@ -159,7 +160,8 @@ namespace netgen
+   enum OPTIMIZEGOAL { OPT_QUALITY, OPT_CONFORM, OPT_REST, OPT_WORSTCASE, OPT_LEGAL };
+ 
+ 
+-  extern DLL_HEADER size_t timestamp;
++  // patch 0008: atomic, as meshes are built on several threads at once
++  extern DLL_HEADER std::atomic<size_t> timestamp;
+   inline size_t GetTimeStamp() 
+   { 
+     return timestamp; 
+@@ -167,8 +169,7 @@ namespace netgen
+ 
+   inline size_t NextTimeStamp()
+   {
+-    timestamp++;
+-    return timestamp;
++    return ++timestamp;
+   }
+   
+   class PointGeomInfo
+@@ -1831,6 +1832,10 @@ inline ostream & operator<<(ostream  & s, const MiniElement2dT<TINDEX> & el)
+     /// BeidPrep patch 0005: time limit in seconds for one face meshing attempt (0 = none);
+     /// a face that exceeds it is given up (left empty and reported) instead of hanging
+     double facetimeout = 0;
++    /// BeidPrep patch 0008: 0 = faces meshed into the shared mesh one after the other (as
++    /// before); n >= 1 = each face is meshed and optimised on its own copy of the mesh, on
++    /// n threads, and the copies are merged in face order - the result does not depend on n
++    int facethreads = 0;
+     /// use delaunay for 3d meshing
+     bool delaunay = true;
+     /// use delaunay for 2d meshing
+diff --git a/libsrc/meshing/python_mesh.hpp b/libsrc/meshing/python_mesh.hpp
+index 930db93..4855480 100644
+--- a/libsrc/meshing/python_mesh.hpp
++++ b/libsrc/meshing/python_mesh.hpp
+@@ -110,6 +110,8 @@ inline void CreateMPfromKwargs(MeshingParameters& mp, py::kwargs kwargs, bool th
+       mp.uselocalh = py::cast<bool>(kwargs.attr("pop")("uselocalh"));
+     if(kwargs.contains("facetimeout"))
+       mp.facetimeout = py::cast<double>(kwargs.attr("pop")("facetimeout"));
++    if(kwargs.contains("facethreads"))
++      mp.facethreads = py::cast<int>(kwargs.attr("pop")("facethreads"));
+     if(kwargs.contains("grading"))
+       mp.grading = py::cast<double>(kwargs.attr("pop")("grading"));
+     if(kwargs.contains("delaunay"))
+diff --git a/libsrc/meshing/ruler2.cpp b/libsrc/meshing/ruler2.cpp
+index f7390c4..f1dc995 100644
+--- a/libsrc/meshing/ruler2.cpp
++++ b/libsrc/meshing/ruler2.cpp
+@@ -200,7 +200,7 @@ namespace netgen
+ 
+ 
+ 
+-    static bool firsttime = true;
++    static thread_local bool firsttime = true;       // patch 0008: per thread
+     // static int timers[100];
+     // static int timers2[100];
+     // static int timers3[100];
+diff --git a/libsrc/meshing/smoothing2.cpp b/libsrc/meshing/smoothing2.cpp
+index d5136af..42e7439 100644
+--- a/libsrc/meshing/smoothing2.cpp
++++ b/libsrc/meshing/smoothing2.cpp
+@@ -585,7 +585,7 @@ namespace netgen
+     //  meshthis -> ProjectPoint (surfi, pp1);
+     //  meshthis -> GetNormalVector (surfi, pp1, n);
+ 
+-    static Array<Point<2>, PointIndex> pts2d;  // better: use hashtable
++    static thread_local Array<Point<2>, PointIndex> pts2d;  // better: use hashtable; patch 0008: per thread
+     pts2d.SetSize(mesh.GetNP());
+ 
+     grad = 0;
+@@ -655,7 +655,7 @@ namespace netgen
+     //    pp1.Add2 (x.Get(1), t1, x.Get(2), t2);
+     pp1 = ld.sp1 + x(0) * ld.t1 + x(1) * ld.t2;
+ 
+-    static Array<Point<2>, PointIndex> pts2d;
++    static thread_local Array<Point<2>, PointIndex> pts2d;   // patch 0008: per thread
+     pts2d.SetSize(mesh.GetNP());
+ 
+     deriv = 0;
+diff --git a/libsrc/occ/occgeom.cpp b/libsrc/occ/occgeom.cpp
+index 0e80926..5b29a06 100644
+--- a/libsrc/occ/occgeom.cpp
++++ b/libsrc/occ/occgeom.cpp
+@@ -3,6 +3,7 @@
+ 
+ #include <cstdio>
+ #include <set>
++#include <mutex>      // patch 0008
+ 
+ #include <mystdlib.h>
+ #include <core/register_archive.hpp>
+@@ -249,7 +250,15 @@ namespace netgen
+   {
+     MeshingParameters local_mp = mparam;
+     auto face = TopoDS::Face(fmap(nr+1));
+-    if(auto quad_dominated = OCCGeometry::GetProperties(face).quad_dominated; quad_dominated.has_value())
++    std::optional<bool> quad_dominated;
++    {
++      // patch 0008: faces may be meshed on several threads at once, and GetProperties adds
++      // a shape it does not find to the global property table
++      static std::mutex props_mutex;
++      std::lock_guard<std::mutex> guard(props_mutex);
++      quad_dominated = OCCGeometry::GetProperties(face).quad_dominated;
++    }
++    if(quad_dominated.has_value())
+       local_mp.quad = *quad_dominated;
+ 
+     bool failed = OCCMeshFace(*this, mesh, glob2loc, local_mp, nr, PARAMETERSPACE, true);

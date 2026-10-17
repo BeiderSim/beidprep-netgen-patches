@@ -20,13 +20,15 @@ The patches apply to **Netgen v6.2.2608** — git tag `v6.2.2608`, commit
 | `patches/0005-per-face-time-limit.patch` | New meshing parameter `facetimeout` (seconds per face attempt): a face that exceeds it is given up cleanly (no half-meshed face) and the rest of the body is still meshed. |
 | `patches/0006-illegal-triangle-table-once.patch` | The table of illegal (duplicate) triangles read by the 2D optimisation is built once after all faces instead of after every face (the same table, so the same mesh; less time). |
 | `patches/0007-face-properties-on-first-use.patch` | A face's surface properties (area and centre of mass, `BRepGProp::SurfaceProperties`) are computed the first time they are asked for instead of whenever a face is created; surface meshing never reads them, so the mesh is the same in less time. |
+| `patches/0008-faces-meshed-on-own-copies.patch` | New meshing parameter `facethreads`: with `facethreads` ≥ 1, each face is meshed and optimised on its own copy of the mesh, on that many threads, and the copies are merged in face order, so the mesh is the same for any number of threads. With 0 (the default) faces are meshed one after the other as before. |
 
 ## Which BeidPrep build uses which patches
 
 | BeidPrep build | Patches applied |
 |---|---|
 | 2.0 beta builds made from BeidPrep mesher revision `202fc59` | 0001–0006 |
-| Builds from BeidPrep mesher revision `6a5561b` on | 0001–0007 |
+| Builds from BeidPrep mesher revision `6a5561b` up to, not including, `a5c78b3` | 0001–0007 |
+| Builds from BeidPrep mesher revision `a5c78b3` on | 0001–0008 |
 
 ## Licence
 

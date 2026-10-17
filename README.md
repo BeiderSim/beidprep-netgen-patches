@@ -21,6 +21,13 @@ The patches apply to **Netgen v6.2.2608** — git tag `v6.2.2608`, commit
 | `patches/0006-illegal-triangle-table-once.patch` | The table of illegal (duplicate) triangles read by the 2D optimisation is built once after all faces instead of after every face (the same table, so the same mesh; less time). |
 | `patches/0007-face-properties-on-first-use.patch` | A face's surface properties (area and centre of mass, `BRepGProp::SurfaceProperties`) are computed the first time they are asked for instead of whenever a face is created; surface meshing never reads them, so the mesh is the same in less time. |
 
+## Which BeidPrep build uses which patches
+
+| BeidPrep build | Patches applied |
+|---|---|
+| 2.0 beta builds made from BeidPrep mesher revision `202fc59` | 0001–0006 |
+| Builds from BeidPrep mesher revision `6a5561b` on | 0001–0007 |
+
 ## Licence
 
 Netgen is distributed under the **GNU Lesser General Public License, version 2.1** (see `LICENSE`, Netgen's own

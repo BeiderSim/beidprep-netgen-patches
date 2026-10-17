@@ -1,0 +1,51 @@
+diff --git a/libsrc/meshing/basegeom.cpp b/libsrc/meshing/basegeom.cpp
+index 69dd1db..8de16b9 100644
+--- a/libsrc/meshing/basegeom.cpp
++++ b/libsrc/meshing/basegeom.cpp
+@@ -900,9 +900,21 @@ namespace netgen
+     }
+ 
+     size_t n_failed_faces = 0;
++    // BeidPrep new-mesher patch 0004: faces that already carry surface elements when surface
++    // meshing starts were meshed by the caller (own structured / quad algorithms). They are
++    // neither re-meshed here nor moved by OptimizeSurface.
++    prefilled_faces.assign(faces.Size(), false);
++    for(const auto & sel : mesh.SurfaceElements())
++      {
++        int k = sel.GetIndex().Nr1() - 1;
++        if(k >= 0 && k < (int)faces.Size() && !sel.IsDeleted())
++          prefilled_faces[k] = true;
++      }
+     Array<int, PointIndex> glob2loc(mesh.GetNP());
+     for(auto k : Range(faces))
+     {
++        if(prefilled_faces[k])
++            continue;
+         auto & face = *faces[k];
+         if(face.primary == &face)
+         {
+@@ -1325,6 +1337,9 @@ namespace netgen
+     for(auto i : Range(mparam.optsteps2d))
+     for(auto fi : mesh.Regions<2>().Range())
+       {
++        int k = fi.Nr1() - 1;
++        if(k >= 0 && k < (int)prefilled_faces.size() && prefilled_faces[k])
++          continue;                         // patch 0004: caller-meshed face, keep as is
+         PrintMessage(3, "Optimization step ", i);
+         meshopt.SetFaceIndex(fi);
+         meshopt.SetMetricWeight (mparam.elsizeweight);
+diff --git a/libsrc/meshing/basegeom.hpp b/libsrc/meshing/basegeom.hpp
+index 5acd1fe..3fb9771 100644
+--- a/libsrc/meshing/basegeom.hpp
++++ b/libsrc/meshing/basegeom.hpp
+@@ -194,6 +194,10 @@ namespace netgen
+ 
+   class DLL_HEADER NetgenGeometry
+   {
++  protected:
++    // patch 0004: faces meshed by the caller before MeshSurface (see basegeom.cpp)
++    mutable std::vector<bool> prefilled_faces;
++  public:
+     unique_ptr<Refinement> ref;
+   protected:
+     Array<unique_ptr<GeometryVertex>> vertices;

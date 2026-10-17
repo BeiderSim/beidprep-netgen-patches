@@ -1,0 +1,47 @@
+--- a/libsrc/meshing/basegeom.cpp
++++ b/libsrc/meshing/basegeom.cpp
+@@ -900,6 +900,7 @@
+     }
+ 
+     size_t n_failed_faces = 0;
++    bool meshed_any_face = false;      // patch 0006
+     // BeidPrep new-mesher patch 0004: faces that already carry surface elements when surface
+     // meshing starts were meshed by the caller (own structured / quad algorithms). They are
+     // neither re-meshed here nor moved by OptimizeSurface.
+@@ -1085,11 +1086,24 @@
+                 }
+             }
+             else
++            {
++                meshed_any_face = true;
+                 if(MeshFace(mesh, mparam, k, glob2loc))
+                     n_failed_faces++;
++            }
+         }
+     }
+ 
++    // BeidPrep new-mesher patch 0006: the table of duplicate ("illegal") triangles is built
++    // once here, after all faces, instead of after every face inside OCCMeshFace (each build
++    // scans the whole mesh: quadratic in the number of faces).  Only the 2D optimisation that
++    // follows reads it, so the result is the same as after the last face.
++    if(meshed_any_face)
++    {
++        auto n_illegal_trigs = mesh.FindIllegalTrigs();
++        PrintMessage (3, n_illegal_trigs, " illegal triangles");
++    }
++
+     if(n_failed_faces) 
+     {
+         cout << "WARNING! NOT ALL FACES HAVE BEEN MESHED" << endl;
+--- a/libsrc/occ/occgenmesh.cpp
++++ b/libsrc/occ/occgenmesh.cpp
+@@ -465,8 +465,7 @@
+     for (SurfaceElementIndex sei : mesh.SurfaceElements().Range().Modify(oldnf, 0))
+       mesh[sei].SetIndex (FaceRegionIndex::FromNr1(k));
+ 
+-    auto n_illegal_trigs = mesh.FindIllegalTrigs();
+-    PrintMessage (3, n_illegal_trigs, " illegal triangles");
++    // patch 0006: the illegal-triangle table is built once after all faces (MeshSurface)
+     return meshing_failed;
+   }
+ 

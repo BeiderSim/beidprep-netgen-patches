@@ -1,0 +1,41 @@
+diff --git a/libsrc/meshing/improve2gen.cpp b/libsrc/meshing/improve2gen.cpp
+index 8709e19..616b446 100644
+--- a/libsrc/meshing/improve2gen.cpp
++++ b/libsrc/meshing/improve2gen.cpp
+@@ -264,12 +264,18 @@ namespace netgen
+ 
+     nelonnode = -4;
+ 
++    // BeidPrep new-mesher patch 0002: the elements of THIS face, collected once (ascending
++    // index, the order the loops below used), so the neighbour and rule loops walk the face
++    // instead of the whole mesh once per face (cost was faces x elements x rules).
++    Array<SurfaceElementIndex> faceels;
++
+     for (SurfaceElementIndex sei : T_Range<SurfaceElementIndex>(ne))
+       {
+         const Element2dRef & el = mesh[sei];
+ 
+         if (el.GetIndex() == faceindex && !el.IsDeleted())
+           {
++            faceels.Append (sei);
+             for (int j = 0; j < el.GetNP(); j++)
+               elonnode.Add (el[j], sei);
+           }
+@@ -280,7 +286,7 @@ namespace netgen
+           }
+       }
+ 
+-    for (SurfaceElementIndex sei : T_Range<SurfaceElementIndex>(ne))
++    for (SurfaceElementIndex sei : faceels)
+       {
+         const Element2dRef & el = mesh[sei];
+         if (el.GetIndex() == faceindex && !el.IsDeleted())
+@@ -312,7 +318,7 @@ namespace netgen
+         pgi.SetSize (rule.onp);
+ 
+ 
+-        for (SurfaceElementIndex sei : T_Range<SurfaceElementIndex>(ne))
++        for (SurfaceElementIndex sei : faceels)
+           {
+             if (multithread.terminate)
+               break;

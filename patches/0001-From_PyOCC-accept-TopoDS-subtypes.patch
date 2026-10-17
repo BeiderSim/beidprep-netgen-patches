@@ -1,0 +1,16 @@
+diff --git a/libsrc/occ/python_occ_shapes.cpp b/libsrc/occ/python_occ_shapes.cpp
+index 372ee44..5980405 100644
+--- a/libsrc/occ/python_occ_shapes.cpp
++++ b/libsrc/occ/python_occ_shapes.cpp
+@@ -758,7 +758,10 @@ DLL_HEADER void ExportNgOCCShapes(py::module &m)
+     if (!swig_obj->ptr || !swig_obj->ty || !swig_obj->ty->name) {
+         throw std::runtime_error("SWIG object does not contain a valid pointer");
+     }
+-    if(strcmp(swig_obj->ty->name, "_p_TopoDS_Shape") != 0)
++    // pythonocc returns down-cast wrappers (TopoDS_Solid, TopoDS_Shell, TopoDS_Face, ...).
++    // They are TopoDS_Shape sub-classes without extra data, so the pointer is a valid
++    // TopoDS_Shape* as well.
++    if(strncmp(swig_obj->ty->name, "_p_TopoDS_", 10) != 0)
+       throw std::runtime_error("Does not contain TopoDS_Shape from pyocc!");
+     return py::cast(static_cast<TopoDS_Shape*>(swig_obj->ptr));
+   }, py::return_value_policy::reference, py::keep_alive<0,1>(),

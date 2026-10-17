@@ -1,0 +1,25 @@
+diff --git a/libsrc/occ/occgenmesh.cpp b/libsrc/occ/occgenmesh.cpp
+index 27f9494..789770e 100644
+--- a/libsrc/occ/occgenmesh.cpp
++++ b/libsrc/occ/occgenmesh.cpp
+@@ -583,6 +583,12 @@ namespace netgen
+               }
+           }
+ 
++        // BeidPrep new-mesher patch 0003: with curvature sizing switched off (curvaturesafety
++        // ~ 0) the edge- and face-curvature passes restrict nothing; skip them, and with them
++        // BuildTriangulation (BRepMesh), which deadlocks in a forked worker process whose
++        // parent already started OCC's thread pool.
++        if (mparam.curvaturesafety > 1e-3)
++        {
+         multithread.task = "Setting local mesh size (edge curvature)";
+ 
+         // setting edge curvature
+@@ -675,6 +681,7 @@ namespace netgen
+                 //cout << "\rFace " << i << " pos12 ntriangles " << ntriangles << flush;
+               }
+           }
++        } // end of curvature passes (patch 0003)
+ 
+         // setting close edges
+ 

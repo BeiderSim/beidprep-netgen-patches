@@ -1,0 +1,72 @@
+diff --git a/libsrc/meshing/meshing2.cpp b/libsrc/meshing/meshing2.cpp
+index fe2e897..a9fd488 100644
+--- a/libsrc/meshing/meshing2.cpp
++++ b/libsrc/meshing/meshing2.cpp
+@@ -428,6 +428,13 @@ namespace netgen
+         if (multithread.terminate)
+           throw NgException ("Meshing stopped");
+ 
++        // BeidPrep patch 0005: per-face time limit
++        if (mp.facetimeout > 0 && GetTime() - starttime > mp.facetimeout)
++          {
++            PrintMessage (1, "face meshing time limit (", mp.facetimeout, " s) reached, giving up this face");
++            break;
++          }
++
+         // known for STL meshing
+         if (totalarea > 0)
+           multithread.percent = 100 * meshedarea / totalarea;
+diff --git a/libsrc/meshing/meshtype.hpp b/libsrc/meshing/meshtype.hpp
+index d818581..2dc1470 100644
+--- a/libsrc/meshing/meshtype.hpp
++++ b/libsrc/meshing/meshtype.hpp
+@@ -1828,6 +1828,9 @@ inline ostream & operator<<(ostream  & s, const MiniElement2dT<TINDEX> & el)
+     bool uselocalh = true;
+     /// grading for local h
+     double grading = 0.3;
++    /// BeidPrep patch 0005: time limit in seconds for one face meshing attempt (0 = none);
++    /// a face that exceeds it is given up (left empty and reported) instead of hanging
++    double facetimeout = 0;
+     /// use delaunay for 3d meshing
+     bool delaunay = true;
+     /// use delaunay for 2d meshing
+diff --git a/libsrc/meshing/python_mesh.hpp b/libsrc/meshing/python_mesh.hpp
+index d0186a1..930db93 100644
+--- a/libsrc/meshing/python_mesh.hpp
++++ b/libsrc/meshing/python_mesh.hpp
+@@ -108,6 +108,8 @@ inline void CreateMPfromKwargs(MeshingParameters& mp, py::kwargs kwargs, bool th
+       mp.relinnersafety = py::cast<double>(kwargs.attr("pop")("relinnersafety"));
+     if(kwargs.contains("uselocalh"))
+       mp.uselocalh = py::cast<bool>(kwargs.attr("pop")("uselocalh"));
++    if(kwargs.contains("facetimeout"))
++      mp.facetimeout = py::cast<double>(kwargs.attr("pop")("facetimeout"));
+     if(kwargs.contains("grading"))
+       mp.grading = py::cast<double>(kwargs.attr("pop")("grading"));
+     if(kwargs.contains("delaunay"))
+diff --git a/libsrc/occ/occgeom.cpp b/libsrc/occ/occgeom.cpp
+index 7df0163..0e80926 100644
+--- a/libsrc/occ/occgeom.cpp
++++ b/libsrc/occ/occgeom.cpp
+@@ -254,7 +254,7 @@ namespace netgen
+ 
+     bool failed = OCCMeshFace(*this, mesh, glob2loc, local_mp, nr, PARAMETERSPACE, true);
+     if(failed)
+-        failed = OCCMeshFace(*this, mesh, glob2loc, local_mp, nr, PLANESPACE, false);
++        failed = OCCMeshFace(*this, mesh, glob2loc, local_mp, nr, PLANESPACE, mparam.facetimeout > 0);  // patch 0005: no half-meshed face
+ 
+     if(failed)
+     {
+diff --git a/libsrc/meshing/basegeom.cpp b/libsrc/meshing/basegeom.cpp
+index 8de16b9..f344738 100644
+--- a/libsrc/meshing/basegeom.cpp
++++ b/libsrc/meshing/basegeom.cpp
+@@ -1094,7 +1094,8 @@ namespace netgen
+     {
+         cout << "WARNING! NOT ALL FACES HAVE BEEN MESHED" << endl;
+         cout << "SURFACE MESHING ERROR OCCURRED IN " << n_failed_faces << " FACES:" << endl;
+-        return;
++        if (mparam.facetimeout <= 0)   // patch 0005: with a time limit, keep the meshed faces
++          return;
+     }
+ 
+     if (mparam.perfstepsend >= MESHCONST_OPTSURFACE)
